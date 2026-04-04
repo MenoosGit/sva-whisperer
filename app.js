@@ -386,6 +386,7 @@ assert property (p_burst_valid);`,
   // ── Temporal Operators Section ──────────────────────────────────
 
   function buildTemporal(rawText) {
+    rawText = stripComments(rawText);
     const found = [];
     const seen = new Set();
 
@@ -452,6 +453,7 @@ assert property (p_burst_valid);`,
   // ── Warnings Section ────────────────────────────────────────────
 
   function buildWarnings(rawText, antecedent) {
+    rawText = stripComments(rawText);
     const w = [];
 
     // Unbounded ##[0:$]
@@ -1500,7 +1502,7 @@ assert property (p_burst_valid);`,
     }
 
     state.lastOutput = result;
-    renderOutput(result);
+    renderOutput(result, raw);
   }
 
   function handleClear() {
@@ -1538,40 +1540,123 @@ assert property (p_burst_valid);`,
     setTimeout(() => { dom.copyBtn.textContent = 'Copy Output'; }, 2000);
   }
 
+  // ── Unsupported Construct Detector ───────────────────────────────
+  // Scans raw SVA text (comments stripped) for specific constructs that
+  // the parser does not handle.  Returns an array of human-readable labels.
+
+  function detectUnsupportedConstructs(rawText) {
+    const found = [];
+    // Strip comments so keywords inside comments don't trigger false positives
+    const s = rawText
+      .replace(/\/\/[^\n]*/g, '')
+      .replace(/\/\*[\s\S]*?\*\//g, '');
+
+    if (/\bsequence\b[\s\S]*?\bendsequence\b/i.test(s))
+      found.push('sequence...endsequence (named sequence bodies are not expanded)');
+    if (/\bnot\s*\(/i.test(s))
+      found.push('not (...) — property negation operator');
+    if (/\bif\s*\(/.test(s))
+      found.push('if/else — conditional property');
+    if (/\b(?:accept_on|reject_on|sync_accept_on|sync_reject_on)\s*\(/i.test(s))
+      found.push('accept_on / reject_on — SVA abort operators');
+    if (/\b(?:strong|weak)\s*\(/i.test(s))
+      found.push('strong() / weak() — property strength modifiers');
+
+    return found;
+  }
+
   // ── Output Rendering ─────────────────────────────────────────────
 
-  function renderOutput(parsed) {
+  function renderOutput(parsed, rawInput) {
     dom.outputContent.innerHTML = '';
     let count = 0;
 
-    // ── TLDR summary ─────────────────────────────────────────────
-    const tldr = buildTLDR(parsed._raw);
-    if (tldr) {
-      const el = document.createElement('p');
-      el.className = 'tldr-section';
-      el.textContent = tldr;          // textContent — XSS safe
-      dom.outputContent.appendChild(el);
+    // ── Detect partial parse ──────────────────────────────────────
+    // A parse is "partial" when no implication operator was found and no
+    // antecedent was isolated — meaning the parser could not decompose the
+    // assertion into trigger / consequent.  Clock/reset and temporal
+    // operators may still be recognized.
+    const { implOp, antecedent, clock } = parsed._raw;
+    const isPartial = !implOp && antecedent === null;
+
+    // Detect specific unsupported constructs in the raw text.
+    // This can trigger even when the assertion IS structurally parsed.
+    const unsupported = detectUnsupportedConstructs(rawInput || '');
+
+    // Show banner when the parse is partial OR specific unsupported constructs
+    // are present.
+    const showBanner = isPartial || unsupported.length > 0;
+
+    // Keys whose content is unreliable when the parse is partial.
+    // clock_reset is only trustworthy when an actual clock was found.
+    const UNRECOGNIZED_KEYS = isPartial
+      ? new Set(clock
+          ? ['trigger', 'implication', 'expectation']
+          : ['clock_reset', 'trigger', 'implication', 'expectation'])
+      : new Set();
+
+    // ── TLDR + waveform (skip for partial — they'd be misleading) ─
+    if (!isPartial) {
+      const tldr = buildTLDR(parsed._raw);
+      if (tldr) {
+        const el = document.createElement('p');
+        el.className = 'tldr-section';
+        el.textContent = tldr;
+        dom.outputContent.appendChild(el);
+      }
+
+      const svgMarkup = buildWaveformSVG(parsed._raw);
+      if (svgMarkup) {
+        const el = document.createElement('div');
+        el.className = 'waveform-section';
+        el.innerHTML = svgMarkup;
+        dom.outputContent.appendChild(el);
+      }
+
+      if (tldr || svgMarkup) {
+        const sep = document.createElement('div');
+        sep.className = 'section-separator';
+        dom.outputContent.appendChild(sep);
+      }
     }
 
-    // ── Waveform diagram ─────────────────────────────────────────
-    const svgMarkup = buildWaveformSVG(parsed._raw);
-    if (svgMarkup) {
-      const el = document.createElement('div');
-      el.className = 'waveform-section';
-      el.innerHTML = svgMarkup;       // programmatic SVG; signal names escaped via escapeHTML()
-      dom.outputContent.appendChild(el);
-    }
+    // ── Partial-parse / unsupported-construct banner ─────────────
+    if (showBanner) {
+      const banner = document.createElement('div');
+      banner.className = 'partial-parse-banner';
 
-    // ── Separator ────────────────────────────────────────────────
-    if (tldr || svgMarkup) {
-      const sep = document.createElement('div');
-      sep.className = 'section-separator';
-      dom.outputContent.appendChild(sep);
+      if (unsupported.length > 0) {
+        // Name the specific constructs that were detected
+        const intro = document.createElement('div');
+        intro.textContent = '⚠️ Unsupported constructs detected — translation may be incomplete:';
+        intro.style.marginBottom = '6px';
+        banner.appendChild(intro);
+
+        const list = document.createElement('ul');
+        list.style.cssText = 'margin:0;padding-left:18px;';
+        unsupported.forEach(label => {
+          const li = document.createElement('li');
+          li.textContent = label;
+          list.appendChild(li);
+        });
+        banner.appendChild(list);
+
+        const hint = document.createElement('div');
+        hint.style.cssText = 'margin-top:6px;opacity:0.8;';
+        hint.textContent = 'Please use the Report Issue button to send us this snippet.';
+        banner.appendChild(hint);
+      } else {
+        // Generic message for partial parses with no identifiable construct
+        banner.textContent = '⚠️ This assertion contains constructs that are not yet supported. Please use the Report Issue button to send us this snippet.';
+      }
+
+      dom.outputContent.appendChild(banner);
     }
 
     // ── Section cards ────────────────────────────────────────────
     SECTION_CONFIG.forEach(({ key, label, role }) => {
-      const text = parsed[key];
+      const isUnrecognized = UNRECOGNIZED_KEYS.has(key);
+      const text = isUnrecognized ? 'Not recognized.' : parsed[key];
       if (!text) return;
 
       const section = document.createElement('div');
@@ -1584,8 +1669,8 @@ assert property (p_burst_valid);`,
       labelEl.textContent = label;
 
       const body = document.createElement('div');
-      body.className = 'section-body';
-      body.textContent = text; // textContent — XSS safe
+      body.className = isUnrecognized ? 'section-body not-recognized' : 'section-body';
+      body.textContent = text;
 
       section.appendChild(labelEl);
       section.appendChild(body);
