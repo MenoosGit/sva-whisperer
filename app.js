@@ -845,6 +845,13 @@ assert property (p_burst_valid);`,
   // individual signal found in the antecedent expression.
 
   function parseAntecedentSignals(str) {
+    const parsed = _parseAntecedentSignals(str);
+    console.log('[parseAntecedentSignals] input:', JSON.stringify(str),
+                '→', parsed.map(s => `${s.negated ? '!' : ''}${s.label}`).join(', '));
+    return parsed;
+  }
+
+  function _parseAntecedentSignals(str) {
     if (!str) return [];
     const s = str.trim();
 
@@ -866,10 +873,23 @@ assert property (p_burst_valid);`,
 
     // Compound: split on && or ||
     if (s.includes('&&') || s.includes('||')) {
-      return s.split(/&&|\|\|/)
+      // Strip outer balanced parens before splitting so a leading "(" on the first
+      // part or a trailing ")" on the last part don't corrupt negation detection.
+      let expr = s;
+      if (expr[0] === '(' && expr[expr.length - 1] === ')') {
+        let d = 0;
+        for (let i = 0; i < expr.length; i++) {
+          if (expr[i] === '(') d++;
+          else if (expr[i] === ')') {
+            if (--d === 0) { if (i === expr.length - 1) expr = expr.slice(1, -1).trim(); break; }
+          }
+        }
+      }
+      return expr.split(/&&|\|\|/)
         .map(p => p.trim())
         .filter(Boolean)
         .map(p => {
+          if (p[0] === '(' && p[p.length - 1] === ')') p = p.slice(1, -1).trim();
           const negSimple = p.match(/^!\s*(\w+)$/);
           if (negSimple) return { label: negSimple[1], negated: true };
           const negParen  = p.match(/^!\s*\(\s*(\w+)\s*\)$/);
@@ -907,6 +927,11 @@ assert property (p_burst_valid);`,
     // Layout
     const ML = 70, MR = 20, MT = 14, MB = 26;
     const ROW_H = 34, SIG_H = 13, SIG_PAD = 9, CW = 54;
+
+    // Edge alignment: posedge transitions at grid lines; negedge at midpoints
+    const isNegedge = clock?.edge === 'negedge';
+    const edgeOff   = isNegedge ? CW / 2 : 0;
+    const edgeX     = (c) => ML + c * CW + edgeOff;
 
     // Signal rows
     const antSigs   = parseAntecedentSignals(antecedent);
@@ -956,8 +981,9 @@ assert property (p_burst_valid);`,
     s += `<line x1="${ML}" y1="${axisY}" x2="${ML + TOTAL * CW}" y2="${axisY}" stroke="${cGrid}" stroke-width="1"/>`;
 
     // Vertical grid lines + cycle labels
-    for (let c = 0; c <= TOTAL; c++) {
-      const x   = ML + c * CW;
+    const gridMax = isNegedge ? TOTAL - 1 : TOTAL;
+    for (let c = 0; c <= gridMax; c++) {
+      const x   = edgeX(c);
       const off = c - TRIG;
       const lbl = off === 0 ? 'N' : off < 0 ? `N${off}` : `N+${off}`;
       const isEval    = c === evalStart && implOffset > 0;
@@ -970,7 +996,7 @@ assert property (p_burst_valid);`,
 
     // |=> evaluation start marker (dashed green vertical)
     if (implOffset > 0) {
-      const xEval = ML + evalStart * CW;
+      const xEval = edgeX(evalStart);
       s += `<line x1="${xEval}" y1="${MT}" x2="${xEval}" y2="${axisY}" stroke="${cImpl}" stroke-width="1" stroke-dasharray="4,3" opacity="0.65"/>`;
       s += `<text x="${xEval + 4}" y="${MT + 11}" font-size="9" fill="${cImpl}">|=></text>`;
     }
@@ -983,16 +1009,16 @@ assert property (p_burst_valid);`,
 
       if (expRow.throughoutRole === 'hold') {
         // Hold signal: shade the full throughout window (TRIG → expectHi+1)
-        const hx1 = ML + TRIG * CW;
-        const hx2 = ML + (expectHi + 1) * CW;
+        const hx1 = edgeX(TRIG);
+        const hx2 = edgeX(expectHi + 1);
         s += `<rect x="${hx1}" y="${ryH}" width="${hx2 - hx1}" height="${SIG_H}" fill="${cWin}" rx="1"/>`;
         return;
       }
 
       // Shaded wait region: evalStart → expectLo
       if (expectLo > evalStart) {
-        const wx1 = ML + evalStart * CW;
-        const wx2 = ML + expectLo * CW;
+        const wx1 = edgeX(evalStart);
+        const wx2 = edgeX(expectLo);
         s += `<rect x="${wx1}" y="${ryH}" width="${wx2 - wx1}" height="${SIG_H}" fill="${cWin}" rx="1"/>`;
         const ay = ryH + SIG_H / 2;
         s += `<line x1="${wx1 + 5}" y1="${ay}" x2="${wx2 - 5}" y2="${ay}" stroke="${cExp}" stroke-width="0.8" stroke-dasharray="3,2" marker-end="url(#wf-arr)" opacity="0.45"/>`;
@@ -1000,8 +1026,8 @@ assert property (p_burst_valid);`,
 
       // Shaded expect window: expectLo → expectHi+1
       if (cons.isRange) {
-        const ex1 = ML + expectLo * CW;
-        const ex2 = ML + (expectHi + 1) * CW;
+        const ex1 = edgeX(expectLo);
+        const ex2 = edgeX(expectHi + 1);
         s += `<rect x="${ex1}" y="${ryH}" width="${ex2 - ex1}" height="${SIG_H}" fill="${cWin}" rx="1"/>`;
       }
     });
@@ -1013,24 +1039,38 @@ assert property (p_burst_valid);`,
       const yL   = ry + SIG_PAD + SIG_H;
       const xEnd = ML + TOTAL * CW;
 
-      // Signal label
-      s += `<text x="${ML - 8}" y="${yH + SIG_H / 2 + 4}" text-anchor="end" font-size="11" fill="${cText}">${escapeHTML(row.label)}</text>`;
+      // Signal label (clock appends edge direction; negated antecedent signals prepend "!")
+      const rowLabel = (row.type === 'clk' && isNegedge)   ? `${row.label} ↓`
+                     : (row.type === 'trigger' && row.negated) ? `!${row.label}`
+                     : row.label;
+      s += `<text x="${ML - 8}" y="${yH + SIG_H / 2 + 4}" text-anchor="end" font-size="11" fill="${cText}">${escapeHTML(rowLabel)}</text>`;
 
       if (row.type === 'clk') {
-        let d = `M${ML},${yL}`;
-        for (let c = 0; c < TOTAL; c++) {
-          const x0 = ML + c * CW, xM = x0 + CW / 2, x1 = x0 + CW;
-          d += ` L${xM},${yL} L${xM},${yH} L${x1},${yH} L${x1},${yL}`;
+        let d;
+        if (isNegedge) {
+          // Negedge clk: HIGH → falls at midpoint (active edge) → LOW → rises at grid line
+          d = `M${ML},${yH}`;
+          for (let c = 0; c < TOTAL; c++) {
+            const x0 = ML + c * CW, xM = x0 + CW / 2, x1 = x0 + CW;
+            d += ` L${xM},${yH} L${xM},${yL} L${x1},${yL} L${x1},${yH}`;
+          }
+        } else {
+          // Posedge clk: LOW → rises at grid line (active edge) → HIGH → falls at midpoint
+          d = `M${ML},${yL} L${ML},${yH}`;
+          for (let c = 0; c < TOTAL; c++) {
+            const x0 = ML + c * CW, xM = x0 + CW / 2, x1 = x0 + CW;
+            d += ` L${xM},${yH} L${xM},${yL} L${x1},${yL} L${x1},${yH}`;
+          }
         }
         s += `<path d="${d}" fill="none" stroke="${cClk}" stroke-width="1.5"/>`;
 
       } else if (row.type === 'trigger') {
-        const xTrig = ML + TRIG * CW;
-        const xNext = ML + (TRIG + 1) * CW;
+        console.log('[waveform trigger row] label:', row.label, 'negated:', row.negated);
+        const xTrig = edgeX(TRIG);
+        const xNext = edgeX(TRIG + 1);
         if (row.negated) {
-          // Active-low: starts HIGH, drops LOW at N, returns HIGH after N+1
-          s += `<path d="M${ML},${yH} L${xTrig},${yH} L${xTrig},${yL} L${xNext},${yL} L${xNext},${yH} L${xEnd},${yH}" fill="none" stroke="${cTrig}" stroke-width="1.5"/>`;
-          s += `<text x="${xTrig + CW / 2}" y="${yH - 3}" text-anchor="middle" font-size="8" fill="${cTrig}" opacity="0.75">! active low</text>`;
+          // Active-low (!sig): flat LOW across entire waveform — asserted when low at cycle N
+          s += `<path d="M${ML},${yL} L${xEnd},${yL}" fill="none" stroke="${cTrig}" stroke-width="1.5"/>`;
         } else {
           // Active-high: LOW → pulse HIGH at N → LOW after N+1
           s += `<path d="M${ML},${yL} L${xTrig},${yL} L${xTrig},${yH} L${xNext},${yH} L${xNext},${yL} L${xEnd},${yL}" fill="none" stroke="${cTrig}" stroke-width="1.5"/>`;
@@ -1038,12 +1078,12 @@ assert property (p_burst_valid);`,
         }
 
       } else if (row.type === 'expect') {
-        const xStart = ML + expectLo * CW;
+        const xStart = edgeX(expectLo);
 
         if (row.dataComparison) {
           // Data bus: filled rect inside the hold window, low lines outside
-          const xBusStart = ML + expectLo * CW;
-          const xBusEnd   = cons.isRange ? ML + (expectHi + 1) * CW : ML + (expectLo + 1) * CW;
+          const xBusStart = edgeX(expectLo);
+          const xBusEnd   = cons.isRange ? edgeX(expectHi + 1) : edgeX(expectLo + 1);
           const diag      = Math.min(6, CW / 4);
           // Resolve source signal name from antecedent capture: "var = src" → show "= src@N"
           const captureM  = antecedent?.match(/,\s*(\w+)\s*=\s*(\w+)/i);
@@ -1060,8 +1100,8 @@ assert property (p_burst_valid);`,
 
         } else if (row.throughoutRole === 'hold') {
           // Sustained HIGH from cycle N through the entire window
-          const xHoldStart = ML + TRIG * CW;
-          const xHoldEnd   = ML + (expectHi + 1) * CW;
+          const xHoldStart = edgeX(TRIG);
+          const xHoldEnd   = edgeX(expectHi + 1);
           s += `<path d="M${ML},${yL} L${xHoldStart},${yL} L${xHoldStart},${yH} L${xHoldEnd},${yH} L${xHoldEnd},${yL} L${xEnd},${yL}" fill="none" stroke="${cExp}" stroke-width="1.5"/>`;
           const labelX = (xHoldStart + xHoldEnd) / 2;
           s += `<text x="${labelX}" y="${yH - 3}" text-anchor="middle" font-size="8" fill="${cExp}" opacity="0.75">throughout</text>`;
@@ -1069,34 +1109,34 @@ assert property (p_burst_valid);`,
         } else if (row.throughoutRole === 'target') {
           // Representative pulse at midpoint of the window
           const midCycle = Math.round((expectLo + expectHi) / 2);
-          const xRep     = ML + midCycle * CW;
-          const xRepEnd  = ML + (midCycle + 1) * CW;
+          const xRep    = edgeX(midCycle);
+          const xRepEnd = edgeX(midCycle + 1);
           s += `<path d="M${ML},${yL} L${xRep},${yL} L${xRep},${yH} L${xRepEnd},${yH} L${xRepEnd},${yL} L${xEnd},${yL}" fill="none" stroke="${cExp}" stroke-width="1.5"/>`;
           s += `<text x="${(xRep + xRepEnd) / 2}" y="${yH - 3}" text-anchor="middle" font-size="8" fill="${cExp}" opacity="0.75">example</text>`;
 
         } else if (row.negated) {
           // Active-low: signal starts HIGH, drops LOW through the expected window
           if (cons.isRange) {
-            const xHi = ML + (expectHi + 1) * CW;
+            const xHi = edgeX(expectHi + 1);
             s += `<path d="M${ML},${yH} L${xStart},${yH} L${xStart},${yL}" fill="none" stroke="${cExp}" stroke-width="1.5"/>`;
             s += `<path d="M${xStart},${yL} L${xHi},${yL}" fill="none" stroke="${cExp}" stroke-width="1.5" stroke-dasharray="5,3"/>`;
             s += `<path d="M${xHi},${yL} L${xHi},${yH} L${xEnd},${yH}" fill="none" stroke="${cExp}" stroke-width="1.5"/>`;
             s += `<text x="${(xStart + xHi) / 2}" y="${yH - 3}" text-anchor="middle" font-size="8" fill="${cExp}" opacity="0.75">must be low</text>`;
           } else {
-            const xFall = ML + repeatEnd * CW;
+            const xFall = edgeX(repeatEnd);
             s += `<path d="M${ML},${yH} L${xStart},${yH} L${xStart},${yL} L${xFall},${yL} L${xFall},${yH} L${xEnd},${yH}" fill="none" stroke="${cExp}" stroke-width="1.5"/>`;
             s += `<text x="${(xStart + xFall) / 2}" y="${yH - 3}" text-anchor="middle" font-size="8" fill="${cExp}" opacity="0.75">must be low</text>`;
           }
         } else if (cons.isRange) {
           // Active-high, range window: dashed top
-          const xHi = ML + (expectHi + 1) * CW;
+          const xHi = edgeX(expectHi + 1);
           s += `<path d="M${ML},${yL} L${xStart},${yL} L${xStart},${yH}" fill="none" stroke="${cExp}" stroke-width="1.5"/>`;
           s += `<path d="M${xStart},${yH} L${xHi},${yH}" fill="none" stroke="${cExp}" stroke-width="1.5" stroke-dasharray="5,3"/>`;
           s += `<path d="M${xHi},${yH} L${xHi},${yL} L${xEnd},${yL}" fill="none" stroke="${cExp}" stroke-width="1.5"/>`;
           s += `<text x="${(xStart + xHi) / 2}" y="${yH - 3}" text-anchor="middle" font-size="8" fill="${cExp}" opacity="0.75">must be high</text>`;
         } else {
           // Active-high, clean pulse
-          const xFall = ML + repeatEnd * CW;
+          const xFall = edgeX(repeatEnd);
           s += `<path d="M${ML},${yL} L${xStart},${yL} L${xStart},${yH} L${xFall},${yH} L${xFall},${yL} L${xEnd},${yL}" fill="none" stroke="${cExp}" stroke-width="1.5"/>`;
           s += `<text x="${(xStart + xFall) / 2}" y="${yH - 3}" text-anchor="middle" font-size="8" fill="${cExp}" opacity="0.75">must be high</text>`;
         }
