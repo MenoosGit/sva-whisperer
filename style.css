@@ -675,6 +675,48 @@ body {
 
 #status-brand { opacity: 0.5; }
 
+/* ── Hover-feature hint banner ───────────────────────────────────── */
+.hover-hint {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  background: rgba(201, 151, 10, 0.06);
+  border: 1px solid rgba(201, 151, 10, 0.2);
+  border-left: 3px solid var(--color-trigger);
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.45;
+  max-height: 200px;
+  overflow: hidden;
+  transition: opacity 0.2s ease, max-height 0.25s ease, padding 0.25s ease;
+}
+
+.hover-hint.dismissing {
+  opacity: 0;
+  max-height: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+.hover-hint-icon { flex-shrink: 0; }
+.hover-hint-text { flex: 1; }
+
+.hover-hint-dismiss {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 4px;
+  opacity: 0.55;
+  transition: opacity 0.15s ease, color 0.15s ease;
+}
+.hover-hint-dismiss:hover { opacity: 1; color: var(--text-primary); }
+
 /* ── SVA Token Tooltip ───────────────────────────────────────────── */
 .sva-tooltip {
   position: fixed;

@@ -1922,8 +1922,29 @@ assert property (p_burst_valid);`,
 
   // ── Output Rendering ─────────────────────────────────────────────
 
+  function maybeInsertHoverHint() {
+    try { if (localStorage.getItem('sva_hint_hover_dismissed') === 'true') return; }
+    catch (_) { /* localStorage unavailable — show every session */ }
+
+    const banner = document.createElement('div');
+    banner.className = 'hover-hint';
+    banner.innerHTML =
+      '<span class="hover-hint-icon">💡</span>' +
+      '<span class="hover-hint-text">Hover over any keyword or signal in the assertion editor to highlight the relevant explanation card here.</span>' +
+      '<button class="hover-hint-dismiss" aria-label="Dismiss hint">×</button>';
+
+    banner.querySelector('.hover-hint-dismiss').addEventListener('click', () => {
+      banner.classList.add('dismissing');
+      try { localStorage.setItem('sva_hint_hover_dismissed', 'true'); } catch (_) {}
+      setTimeout(() => banner.remove(), 260);
+    });
+
+    dom.outputContent.appendChild(banner);
+  }
+
   function renderOutput(parsed, rawInput) {
     dom.outputContent.innerHTML = '';
+    maybeInsertHoverHint();
     let count = 0;
 
     // ── Detect partial parse ──────────────────────────────────────
