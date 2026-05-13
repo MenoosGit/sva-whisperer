@@ -1501,6 +1501,8 @@ assert property (p_burst_valid);`,
 
   let dom = {};
   const state = { lastOutput: null, activeRole: null };
+  let _tooltipTimer = null;
+  let _tooltipSpan  = null;
 
   function cacheDom() {
     dom = {
@@ -1509,6 +1511,7 @@ assert property (p_burst_valid);`,
       charCount:         document.getElementById('char-count'),
       clearBtn:          document.getElementById('clear-btn'),
       translateBtn:      document.getElementById('translate-btn'),
+      outputArea:         document.getElementById('output-area'),
       outputPlaceholder:  document.getElementById('output-placeholder'),
       outputContent:      document.getElementById('output-content'),
       outputPanelFooter:  document.getElementById('output-panel-footer'),
@@ -1516,6 +1519,10 @@ assert property (p_burst_valid);`,
       copyBtn:            document.getElementById('copy-btn'),
       exampleBtns:        document.querySelectorAll('.example-btn'),
     };
+    // Tooltip div — created in JS so it lives outside the editor stacking context
+    dom.tooltip = document.createElement('div');
+    dom.tooltip.className = 'sva-tooltip';
+    document.body.appendChild(dom.tooltip);
   }
 
   function bindEvents() {
@@ -1577,8 +1584,40 @@ assert property (p_burst_valid);`,
 
       const roleEl = el?.closest('[data-role]');
       setActiveRole(roleEl?.dataset?.role || null);
+
+      // Tooltip: only reschedule when the hovered span changes
+      if (roleEl !== _tooltipSpan) {
+        _tooltipSpan = roleEl;
+        scheduleTooltip(roleEl, e.clientX, e.clientY);
+      }
     });
-    dom.svaInput.addEventListener('mouseleave', () => setActiveRole(null));
+    dom.svaInput.addEventListener('mouseleave', () => {
+      setActiveRole(null);
+      hideTooltip();
+      _tooltipSpan = null;
+    });
+
+    // Click → scroll the matching output card into view
+    dom.svaInput.addEventListener('click', (e) => {
+      if (!state.lastOutput) return;
+      dom.svaInput.style.pointerEvents = 'none';
+      dom.highlightLayer.style.pointerEvents = 'auto';
+      const el = document.elementFromPoint(e.clientX, e.clientY);
+      dom.svaInput.style.pointerEvents = '';
+      dom.highlightLayer.style.pointerEvents = '';
+
+      const role = el?.closest('[data-role]')?.dataset?.role;
+      if (!role) return;
+
+      const card = dom.outputContent.querySelector(`.output-section[data-role="${role}"]`);
+      if (!card) return;
+
+      card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      card.animate(
+        [{ boxShadow: '0 0 0 2px rgba(255,255,255,0.18)' }, { boxShadow: '0 0 0 0 transparent' }],
+        { duration: 600, easing: 'ease' }
+      );
+    });
 
     // Card → Code: delegate on the cards container
     dom.outputContent.addEventListener('mouseover', (e) => {
@@ -1615,6 +1654,174 @@ assert property (p_burst_valid);`,
       if (el.dataset.role === role) el.classList.add('card-active');
       else el.classList.add('card-dimmed');
     });
+
+    // Scroll the active card into view (no-op when already visible)
+    dom.outputContent.querySelector(`.output-section[data-role="${role}"]`)
+      ?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+
+  // ── Token Tooltip ─────────────────────────────────────────────────
+
+  function scheduleTooltip(spanEl, cx, cy) {
+    clearTimeout(_tooltipTimer);
+    if (!spanEl || !state.lastOutput) { hideTooltip(); return; }
+    const content = getTooltipContent(spanEl);
+    if (!content) { hideTooltip(); return; }
+    _tooltipTimer = setTimeout(() => showTooltip(content, cx, cy), 200);
+  }
+
+  function showTooltip(content, cx, cy) {
+    dom.tooltip.style.borderLeftColor = content.border;
+    dom.tooltip.innerHTML = content.html;
+    // Measure while invisible, then position, then reveal
+    const vw = window.innerWidth, vh = window.innerHeight;
+    const tw = dom.tooltip.offsetWidth  || 320;
+    const th = dom.tooltip.offsetHeight || 60;
+    let x = cx + 14, y = cy + 18;
+    if (x + tw > vw - 8) x = Math.max(8, cx - tw - 10);
+    if (y + th > vh - 8) y = Math.max(8, cy - th - 10);
+    dom.tooltip.style.left = x + 'px';
+    dom.tooltip.style.top  = y + 'px';
+    dom.tooltip.classList.add('visible');
+  }
+
+  function hideTooltip() {
+    clearTimeout(_tooltipTimer);
+    dom.tooltip.classList.remove('visible');
+  }
+
+  function getTooltipContent(spanEl) {
+    const role = spanEl.dataset?.role;
+    const text = spanEl.textContent || '';
+    const raw  = state.lastOutput._raw;
+
+    const esc  = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const code = (s) => `<code>${esc(s)}</code>`;
+
+    switch (role) {
+      case 'clock': {
+        if (/disable/i.test(text)) {
+          const cond = raw.disableIff ? `: ${esc(raw.disableIff)}` : '';
+          return {
+            border: 'var(--color-clock)',
+            html: `<strong>disable iff</strong> — property is not checked while this condition holds${cond}.`,
+          };
+        }
+        const clk = raw.clock;
+        if (!clk) return null;
+        const dir = clk.edge === 'negedge' ? 'falling' : 'rising';
+        return {
+          border: 'var(--color-clock)',
+          html: `Sampled at every <strong>${dir} edge</strong> of ${code(clk.signal)}.`,
+        };
+      }
+
+      case 'implication': {
+        if (text.includes('|->')) {
+          return {
+            border: 'var(--color-implic)',
+            html: `<strong>Overlapping</strong> ${code('|->')}<br>If the antecedent holds at cycle N, the consequent is checked from the <em>same cycle N</em>.`,
+          };
+        }
+        return {
+          border: 'var(--color-implic)',
+          html: `<strong>Non-overlapping</strong> ${code('|=>')}<br>If the antecedent holds at cycle N, the consequent is checked from cycle <em>N+1</em>.`,
+        };
+      }
+
+      case 'trigger':
+        return {
+          border: 'var(--color-trigger)',
+          html: '<strong>Antecedent</strong> — must hold at the trigger cycle for this property to fire.',
+        };
+
+      case 'expectation': {
+        const expText = state.lastOutput.expectation;
+        return {
+          border: 'var(--color-expect)',
+          html: expText
+            ? `<strong>Consequent</strong><br>${esc(expText)}`
+            : '<strong>Consequent</strong> — must satisfy this condition when the property fires.',
+        };
+      }
+
+      case 'temporal':
+        return getTemporalTooltip(text);
+
+      default:
+        return null;
+    }
+  }
+
+  function getTemporalTooltip(text) {
+    const esc  = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const code = (s) => `<code>${esc(s)}</code>`;
+    const C    = 'var(--color-temporal)';
+
+    // System functions: $fn(args)
+    const sfM = text.match(/\$(\w+)\s*\(([^)]*)\)/);
+    if (sfM) {
+      const fn   = sfM[1].toLowerCase();
+      const args = sfM[2].trim().split(/\s*,\s*/);
+      const sig  = args[0];
+      switch (fn) {
+        case 'rose':
+          return { border: C, html: `${code('$rose(' + sig + ')')}<br>${code(sig)} transitions <strong>0→1</strong> at this clock edge.` };
+        case 'fell':
+          return { border: C, html: `${code('$fell(' + sig + ')')}<br>${code(sig)} transitions <strong>1→0</strong> at this clock edge.` };
+        case 'stable':
+          return { border: C, html: `${code('$stable(' + sig + ')')}<br>${code(sig)} holds the <strong>same value</strong> as in the previous cycle.` };
+        case 'past': {
+          const n      = args[1];
+          const cycles = n ? `${n} clock cycle${n === '1' ? '' : 's'}` : 'the previous cycle';
+          return { border: C, html: `${code('$past(' + sfM[2].trim() + ')')}<br>Samples ${code(sig)} from <strong>${cycles} ago</strong>.` };
+        }
+        case 'isunknown':
+          return { border: C, html: `${code('$isunknown(' + sig + ')')}<br>True if any bit of ${code(sig)} is <strong>X or Z</strong> (unknown/undefined).` };
+        case 'onehot':
+          return { border: C, html: `${code('$onehot(' + sig + ')')}<br>Exactly <strong>one bit</strong> of ${code(sig)} is 1.` };
+        case 'onehot0':
+          return { border: C, html: `${code('$onehot0(' + sig + ')')}<br>At most <strong>one bit</strong> of ${code(sig)} is 1 (zero also valid).` };
+        case 'countones':
+          return { border: C, html: `${code('$countones(' + sig + ')')}<br>Returns the <strong>popcount</strong> (number of 1-bits) in ${code(sig)}.` };
+      }
+    }
+
+    // ## delay range ##[M:N] or ##N
+    const rngM = text.match(/##\s*\[\s*(\d+)\s*:\s*(\d+|\$)\s*\]/);
+    if (rngM) {
+      const lo = rngM[1], hi = rngM[2];
+      if (hi === '$') return { border: C, html: `Unbounded delay — at least <strong>${lo}</strong> cycle${lo === '1' ? '' : 's'} later.` };
+      return { border: C, html: `Delay range — between <strong>${lo}</strong> and <strong>${hi}</strong> clock cycles later.` };
+    }
+    const exM = text.match(/##\s*(\d+)/);
+    if (exM) {
+      const n = exM[1];
+      return { border: C, html: `Fixed delay — exactly <strong>${n}</strong> clock cycle${n === '1' ? '' : 's'} later.` };
+    }
+
+    // Consecutive repetition [*N] or [*M:N]
+    const repM = text.match(/\[\s*\*\s*(\d+)(?:\s*:\s*(\d+|\$))?\s*\]/);
+    if (repM) {
+      const hi = repM[2] ? (repM[2] === '$' ? '∞' : repM[2]) : null;
+      if (hi) return { border: C, html: `Consecutive repetition — preceding signal must be HIGH for <strong>${repM[1]}–${hi}</strong> consecutive cycles.` };
+      return { border: C, html: `Consecutive repetition — preceding signal must be HIGH for exactly <strong>${repM[1]}</strong> consecutive cycle${repM[1] === '1' ? '' : 's'}.` };
+    }
+
+    if (/\bthroughout\b/i.test(text)) {
+      return { border: C, html: `<strong>throughout</strong> — the left-hand signal must hold <strong>continuously</strong> for the entire duration of the right-hand sequence.` };
+    }
+    if (/\bintersect\b/i.test(text)) {
+      return { border: C, html: `<strong>intersect</strong> — both sequences must be active simultaneously and <strong>end at the same cycle</strong>.` };
+    }
+    if (/\bwithin\b/i.test(text)) {
+      return { border: C, html: `<strong>within</strong> — the first sequence must complete <strong>within</strong> the window of the second sequence.` };
+    }
+    if (/\bfirst_match\b/i.test(text)) {
+      return { border: C, html: `<strong>first_match</strong> — uses only the <strong>first (shortest) match</strong> of the sequence.` };
+    }
+
+    return null;
   }
 
   function updateCharCount() {
@@ -1857,6 +2064,7 @@ assert property (p_burst_valid);`,
 
   function clearOutput() {
     setActiveRole(null);
+    dom.outputArea.scrollTop = 0;
     dom.outputContent.innerHTML = '';
     dom.outputContent.hidden = true;
     dom.outputPlaceholder.hidden = false;
@@ -1922,6 +2130,7 @@ assert property (p_burst_valid);`,
         extractConsequentInfo,
         buildTLDR,
         detectUnsupportedConstructs,
+        buildWaveformSVG,
       },
     };
   }

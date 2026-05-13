@@ -550,6 +550,7 @@ body {
 /* Non-matching role spans fade when something is active */
 #highlight-layer span.hl-dimmed { opacity: 0.25; }
 
+
 /* ── Partial Parse Banner ────────────────────────────────────────── */
 .partial-parse-banner {
   display: flex;
@@ -673,6 +674,46 @@ body {
 }
 
 #status-brand { opacity: 0.5; }
+
+/* ── SVA Token Tooltip ───────────────────────────────────────────── */
+.sva-tooltip {
+  position: fixed;
+  z-index: 1000;
+  max-width: 320px;
+  padding: 8px 12px;
+  background: #1e1e2e;
+  border: 1px solid var(--border-color);
+  border-left: 3px solid var(--border-strong); /* overridden per token role via JS */
+  border-radius: 4px;
+  font-family: var(--font-sans);
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-secondary);
+  pointer-events: none;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+  white-space: normal;
+  word-break: break-word;
+  visibility: hidden;
+  opacity: 0;
+  transition: opacity 0.1s ease;
+}
+
+.sva-tooltip.visible {
+  visibility: visible;
+  opacity: 1;
+}
+
+.sva-tooltip strong { color: var(--text-primary); font-weight: 600; }
+
+.sva-tooltip code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  background: rgba(255,255,255,0.07);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+
+.sva-tooltip em { font-style: normal; color: var(--text-primary); }
 
 /* ── Responsive ──────────────────────────────────────────────────── */
 @media (max-width: 900px) {
