@@ -232,6 +232,8 @@ assert property (p_burst_valid);`,
     e = e.replace(/\$stable\s*\(\s*([^)]+?)\s*\)/gi,     (_, s) => `${s.trim()} is stable (unchanged)`);
     e = e.replace(/\$past\s*\(\s*([^,)]+?)\s*,\s*(\d+)\s*\)/gi, (_, s, n) => `${s.trim()} from ${n} cycle${n > 1 ? 's' : ''} ago`);
     e = e.replace(/\$past\s*\(\s*([^)]+?)\s*\)/gi,       (_, s) => `${s.trim()} from the previous cycle`);
+    // Negated form must be matched first so !$isunknown(sig) → "no X/Z bits", not "NOT sig has X/Z bits"
+    e = e.replace(/!\s*\$isunknown\s*\(\s*([^)]+?)\s*\)/gi, (_, s) => `${s.trim()} has no X/Z bits`);
     e = e.replace(/\$isunknown\s*\(\s*([^)]+?)\s*\)/gi,  (_, s) => `${s.trim()} has X/Z bits`);
     e = e.replace(/\$onehot0\s*\(\s*([^)]+?)\s*\)/gi,    (_, s) => `${s.trim()} is one-hot or zero`);
     e = e.replace(/\$onehot\s*\(\s*([^)]+?)\s*\)/gi,     (_, s) => `${s.trim()} is one-hot`);
@@ -333,7 +335,7 @@ assert property (p_burst_valid);`,
     if (!consequent) return 'No consequent identified.';
     const cons = extractConsequentInfo(consequent);
 
-    // equality fast-path (data-capture check: out_data == captured_data)
+    // equality: simple identifier RHS = data-capture (local var); complex expression = constant/param
     if (cons.equality) {
       const { lhs, rhs } = cons.equality;
       let timingLine = '';
@@ -344,7 +346,10 @@ assert property (p_burst_valid);`,
       const boolLines = cons.signals
         .filter(sig => !sig.equalTo)
         .map(sig => sig.negated ? `${sig.label} must be LOW` : `${sig.label} must be HIGH`);
-      const condLines = [...boolLines, `${lhs} must equal the value captured in ${rhs} (local variable).`];
+      const equalityLine = /^\w+$/.test(rhs)
+        ? `${lhs} must equal the value captured in ${rhs} (local variable).`
+        : `${lhs} must equal ${humanizeExpr(rhs)}.`;
+      const condLines = [...boolLines, equalityLine];
       const parts = timingLine ? [timingLine, ...condLines] : condLines;
       return parts.join('\n');
     }
@@ -653,9 +658,9 @@ assert property (p_burst_valid);`,
       if (inner) s = inner.trim();
     }
 
-    // Equality comparison: sig == other (data-capture check)
-    const eqM = s.match(/^(\w+)\s*==\s*(\w+)$/);
-    if (eqM) return [{ label: eqM[1], negated: false, equalTo: eqM[2] }];
+    // Equality: sig == expr — RHS may be a simple identifier (data-capture) or a full expression
+    const eqM = s.match(/^(\w+)\s*==\s*(.+)$/);
+    if (eqM) return [{ label: eqM[1], negated: false, equalTo: eqM[2].trim() }];
 
     // Repetition: signal[*N] → single non-negated signal
     const repM = s.match(/^(\w+)\s*\[\s*\*/);
@@ -781,8 +786,8 @@ assert property (p_burst_valid);`,
       let timingPhrase;
       if (totalLo === 0 && totalHi === 0)  timingPhrase = 'in the same cycle';
       else if (totalLo === totalHi)        timingPhrase = totalLo === 1 ? 'one cycle later' : `exactly ${totalLo} cycles later`;
-      else if (cons.isUnbounded)           timingPhrase = `${totalLo} or more cycles later`;
-      else                                 timingPhrase = `${totalLo}–${totalHi} cycles later`;
+      else if (cons.isUnbounded)           timingPhrase = `at least ${totalLo} cycles later`;
+      else                                 timingPhrase = `at least once between cycles ${totalLo} and ${totalHi}`;
       // Include any co-occurring boolean signals (e.g. out_vld && out_data == captured_data)
       const boolSigs = cons.signals.filter(s => !s.equalTo && !localVars.has(s.label));
       const boolPart = boolSigs.length > 0
@@ -811,6 +816,7 @@ assert property (p_burst_valid);`,
     let thenPhrase;
     if (cons.signals.length > 0) {
       const sigPhrases = cons.signals.map(sig => {
+        if (sig.equalTo)        return `${sig.label} must equal ${/^\w+$/.test(sig.equalTo) ? sig.equalTo : humanizeExpr(sig.equalTo)}`;
         if (sig.negated)        return `${sig.label} must be low`;
         if (cons.repeat > 1)    return `${sig.label} must stay high for exactly ${cons.repeat} consecutive cycles`;
         return `${sig.label} must be high`;
@@ -834,9 +840,9 @@ assert property (p_burst_valid);`,
     } else if (totalLo === totalHi) {
       timingPhrase = totalLo === 1 ? 'one cycle later' : `exactly ${totalLo} cycles later`;
     } else if (cons.isUnbounded) {
-      timingPhrase = `${totalLo} or more cycles later`;
+      timingPhrase = `at least ${totalLo} cycles later`;
     } else {
-      timingPhrase = `${totalLo}–${totalHi} cycles later`;
+      timingPhrase = `at least once between cycles ${totalLo} and ${totalHi}`;
     }
 
     return `${whenPhrase}, ${thenPhrase} ${timingPhrase}.`;
@@ -867,6 +873,14 @@ assert property (p_burst_valid);`,
     const fellM = s.match(/^\$fell\s*\(\s*(\w+)\s*\)$/i);
     if (fellM) return [{ label: fellM[1], negated: false }];
 
+    // !$past(sig): use the raw signal name as label; isPast drives the "@ N-1" sampling annotation
+    const negPastSingle = s.match(/^!\s*\$past\s*\(\s*(\w+)\s*(?:,\s*\d+\s*)?\)$/i);
+    if (negPastSingle) return [{ label: negPastSingle[1], negated: true, isPast: true }];
+
+    // !$isunknown(sig): waveform row stays LOW when no X/Z; negated=true gives flat-LOW shape
+    const negIsunkSingle = s.match(/^!\s*\$isunknown\s*\(\s*(\w+)\s*\)$/i);
+    if (negIsunkSingle) return [{ label: `isunknown(${negIsunkSingle[1]})`, negated: true }];
+
     // Single bare identifier (possibly negated)
     const negSingle = s.match(/^!\s*(\w+)$/);
     if (negSingle) return [{ label: negSingle[1], negated: true }];
@@ -896,6 +910,12 @@ assert property (p_burst_valid);`,
           if (negSimple) return { label: negSimple[1], negated: true };
           const negParen  = p.match(/^!\s*\(\s*(\w+)\s*\)$/);
           if (negParen)  return { label: negParen[1],  negated: true };
+          // !$past(sig) in compound: label = raw signal name; isPast drives "@ N-1" annotation
+          const negPast = p.match(/^!\s*\$past\s*\(\s*(\w+)\s*(?:,\s*\d+\s*)?\)$/i);
+          if (negPast) return { label: negPast[1], negated: true, isPast: true };
+          // !$isunknown(sig) in compound: row stays LOW when no X/Z
+          const negIsunk = p.match(/^!\s*\$isunknown\s*\(\s*(\w+)\s*\)$/i);
+          if (negIsunk) return { label: `isunknown(${negIsunk[1]})`, negated: true };
           const rM = p.match(/\$(?:rose|fell)\s*\(\s*(\w+)\s*\)/i);
           if (rM) return { label: rM[1], negated: false };
           const wM = p.match(/\b(\w+)\b/);
@@ -924,24 +944,42 @@ assert property (p_burst_valid);`,
     const expectLo  = evalStart + cons.delayLo;
     const expectHi  = evalStart + cons.delayHi;
     const repeatEnd = expectLo + cons.repeat;
-    const TOTAL     = Math.min(Math.max(expectHi + 2, repeatEnd + 1, 4), 10);
+    const TOTAL     = Math.min(Math.max(expectHi + 2, repeatEnd + 1, 8), 10);
 
-    // Layout
-    const ML = 70, MR = 20, MT = 14, MB = 26;
-    const ROW_H = 34, SIG_H = 13, SIG_PAD = 9, CW = 54;
+    // Layout constants — all in SVG units; change here to rescale the whole waveform
+    const MAX_LABEL_CHARS = 16; // labels longer than this are truncated with "…" to protect the drawing area
+    const MR = 20, MT = 10, MB = 42; // extra 22px at bottom reserved for the color legend
+    const ROW_H = 28, SIG_H = 10, SIG_PAD = 8, CW = 46;
+    // PRE: signals transition this many px BEFORE the active edge (pre-poned sampling visual)
+    const PRE = Math.round(CW * 0.15);
 
-    // Edge alignment: posedge transitions at grid lines; negedge at midpoints
+    // Needed early for label width calculation
     const isNegedge = clock?.edge === 'negedge';
-    const edgeOff   = isNegedge ? CW / 2 : 0;
-    const edgeX     = (c) => ML + c * CW + edgeOff;
 
-    // Signal rows
+    // Signal rows — built before ML so the longest label can widen the left margin
     const antSigs   = parseAntecedentSignals(antecedent);
     const antLabels = new Set(antSigs.map(s => s.label));
+
+    // Pre-scan: !$isunknown(X) conditions whose target X has its own bus row in the consequent.
+    // These are absorbed into the bus row rather than drawn as a separate trigger row.
+    const consSignalLabels = new Set(cons.signals.map(s => s.label));
+    const isUnknownTargets = new Set();
+    for (const sig of antSigs) {
+      if (sig.negated && sig.label.includes('(')) {
+        const m = sig.label.match(/\w+\((\w+)\)/);
+        if (m && consSignalLabels.has(m[1])) isUnknownTargets.add(m[1]);
+      }
+    }
+
     const rows = [];
     rows.push({ label: clock?.signal || 'clk', type: 'clk' });
     for (const sig of antSigs) {
-      rows.push({ label: sig.label, type: 'trigger', negated: sig.negated });
+      // Skip !$isunknown rows whose target already appears as a bus — encoded on the bus instead
+      if (sig.negated && sig.label.includes('(')) {
+        const m = sig.label.match(/\w+\((\w+)\)/);
+        if (m && isUnknownTargets.has(m[1])) continue;
+      }
+      rows.push({ label: sig.label, type: 'trigger', negated: sig.negated, isPast: sig.isPast || false });
     }
     if (cons.throughout) {
       rows.push({ label: cons.throughout.holdSignal,   type: 'expect', negated: false, throughoutRole: 'hold'   });
@@ -949,13 +987,42 @@ assert property (p_burst_valid);`,
     } else {
       for (const sig of cons.signals) {
         if (localVars.has(sig.label)) continue;           // never draw local var rows
-        if (sig.equalTo && localVars.has(sig.equalTo)) {  // data-capture comparison
-          if (!antLabels.has(sig.label)) rows.push({ label: sig.label, type: 'expect', negated: false, dataComparison: sig.equalTo });
+        if (sig.equalTo && localVars.has(sig.equalTo)) {  // data-capture comparison (local var)
+          if (!antLabels.has(sig.label)) rows.push({ label: sig.label, type: 'expect', negated: false, dataComparison: sig.equalTo, hasIsUnknownGate: isUnknownTargets.has(sig.label) });
+        } else if (sig.equalTo && !/^\w+$/.test(sig.equalTo)) {  // general equality (constant/param expression)
+          if (!antLabels.has(sig.label)) {
+            let busVal = sig.equalTo.trim();
+            // Strip outer parens, then remove spaces around operators so the expression fits
+            if (busVal[0] === '(' && busVal[busVal.length - 1] === ')') busVal = busVal.slice(1, -1).trim();
+            busVal = busVal.replace(/\s*([+\-*/])\s*/g, '$1');
+            rows.push({ label: sig.label, type: 'expect', negated: false, busValue: busVal, hasIsUnknownGate: isUnknownTargets.has(sig.label) });
+          }
         } else if (cons.repeat > 1 || !antLabels.has(sig.label)) {
           rows.push({ label: sig.label, type: 'expect', negated: sig.negated });
         }
       }
     }
+
+    // Unified label renderer — used both for ML sizing and the actual SVG text element.
+    // isPast is checked before negated so "rst_i @N-1" wins over "!rst_i".
+    const getRenderedLabel = (row) => {
+      let lbl;
+      if      (row.type === 'clk' && isNegedge)       lbl = `${row.label} ↓`;
+      else if (row.type === 'trigger' && row.isPast)  lbl = `${row.label} @N-1`;
+      else if (row.type === 'trigger' && row.negated) lbl = `!${row.label}`;
+      else                                            lbl = row.label;
+      // Only truncate trigger labels (which can carry long system-fn expressions).
+      // Signal names (clk, expect) are always shown in full so the label column is never cut short.
+      if (row.type !== 'trigger') return lbl;
+      return lbl.length > MAX_LABEL_CHARS ? lbl.slice(0, MAX_LABEL_CHARS - 1) + '…' : lbl;
+    };
+    const longestLabelLen = rows.reduce((mx, r) => Math.max(mx, getRenderedLabel(r).length), 0);
+    // 36-unit bracket zone on the far left + ~6px per char (font-size 9 sans-serif) + 8px right pad
+    // The 36-unit zone is where bspine/barm are anchored, guaranteeing they never overlap labels.
+    const ML = Math.max(80, 36 + longestLabelLen * 6);
+
+    const edgeOff = isNegedge ? CW / 2 : 0;
+    const edgeX   = (c) => ML + c * CW + edgeOff;
 
     const svgW  = ML + TOTAL * CW + MR;
     const svgH  = MT + rows.length * ROW_H + MB;
@@ -993,7 +1060,7 @@ assert property (p_burst_valid);`,
       const lblColor  = isEval ? cImpl : inWindow ? cExp : cText;
 
       s += `<line x1="${x}" y1="${MT}" x2="${x}" y2="${axisY}" stroke="${cGrid}" stroke-width="1"${c > 0 ? ' stroke-dasharray="2,4"' : ''}/>`;
-      s += `<text x="${x}" y="${axisY + 17}" text-anchor="middle" font-size="10" fill="${lblColor}">${escapeHTML(lbl)}</text>`;
+      s += `<text x="${x}" y="${axisY + 17}" text-anchor="middle" font-size="9" fill="${lblColor}">${escapeHTML(lbl)}</text>`;
     }
 
     // |=> evaluation start marker (dashed green vertical)
@@ -1041,11 +1108,9 @@ assert property (p_burst_valid);`,
       const yL   = ry + SIG_PAD + SIG_H;
       const xEnd = ML + TOTAL * CW;
 
-      // Signal label (clock appends edge direction; negated antecedent signals prepend "!")
-      const rowLabel = (row.type === 'clk' && isNegedge)   ? `${row.label} ↓`
-                     : (row.type === 'trigger' && row.negated) ? `!${row.label}`
-                     : row.label;
-      s += `<text x="${ML - 8}" y="${yH + SIG_H / 2 + 4}" text-anchor="end" font-size="11" fill="${cText}">${escapeHTML(rowLabel)}</text>`;
+      // Signal label via unified renderer (handles !prefix, @N-1 badge, truncation)
+      const rowLabel = getRenderedLabel(row);
+      s += `<text x="${ML - 8}" y="${yH + SIG_H / 2 + 4}" text-anchor="end" font-size="9" fill="${cText}">${escapeHTML(rowLabel)}</text>`;
 
       if (row.type === 'clk') {
         let d;
@@ -1067,16 +1132,21 @@ assert property (p_burst_valid);`,
         s += `<path d="${d}" fill="none" stroke="${cClk}" stroke-width="1.5"/>`;
 
       } else if (row.type === 'trigger') {
-        console.log('[waveform trigger row] label:', row.label, 'negated:', row.negated);
         const xTrig = edgeX(TRIG);
         const xNext = edgeX(TRIG + 1);
-        if (row.negated) {
-          // Active-low (!sig): flat LOW across entire waveform — asserted when low at cycle N
+        // A simple negated BIT signal (no parens in label, e.g. !fifo_full) is shown active-low
+        // (the physical signal is LOW when the condition holds). System-function conditions
+        // (label contains "(" e.g. isunknown(cyc_cnt)) are shown active-high because they have
+        // no physical wire value — HIGH means the condition is TRUE during the trigger window.
+        const isActiveLow = row.negated && !row.label.includes('(');
+        if (isActiveLow) {
           s += `<path d="M${ML},${yL} L${xEnd},${yL}" fill="none" stroke="${cTrig}" stroke-width="1.5"/>`;
         } else {
-          // Active-high: LOW → pulse HIGH at N → LOW after N+1
-          s += `<path d="M${ML},${yL} L${xTrig},${yL} L${xTrig},${yH} L${xNext},${yH} L${xNext},${yL} L${xEnd},${yL}" fill="none" stroke="${cTrig}" stroke-width="1.5"/>`;
-          s += `<text x="${xTrig + CW / 2}" y="${yH - 3}" text-anchor="middle" font-size="8" fill="${cTrig}" opacity="0.75">trigger</text>`;
+          // Active-high: rise/fall shifted PRE px before the edge → pre-poned stable value visible
+          const xRise = Math.max(ML + 1, xTrig - PRE);
+          const xFall = Math.max(xRise + 2, xNext - PRE);
+          s += `<path d="M${ML},${yL} L${xRise},${yL} L${xRise},${yH} L${xFall},${yH} L${xFall},${yL} L${xEnd},${yL}" fill="none" stroke="${cTrig}" stroke-width="1.5"/>`;
+          s += `<text x="${(xRise + xFall) / 2}" y="${yH - 3}" text-anchor="middle" font-size="8" fill="${cTrig}" opacity="0.75">trigger</text>`;
         }
 
       } else if (row.type === 'expect') {
@@ -1099,6 +1169,56 @@ assert property (p_burst_valid);`,
           s += `<path d="M${xBusStart},${yL} L${xBusStart + diag},${yH} L${xBusEnd - diag},${yH} L${xBusEnd},${yL}" fill="none" stroke="${cExp}" stroke-width="1.5"/>`;
           // Label inside the bar
           s += `<text x="${(xBusStart + xBusEnd) / 2}" y="${(yH + yL) / 2 + 3}" text-anchor="middle" font-size="8" fill="${cExp}" opacity="0.9">${escapeHTML(`= ${srcLabel}@N`)}</text>`;
+
+        } else if (row.busValue) {
+          // General equality: 1-cycle pulse at the check cycle; value label floats above the pulse
+          const xBusStart = edgeX(expectLo);
+          const xBusEnd   = edgeX(expectHi + 1);
+          const diag = Math.min(6, CW / 4);
+          const cUnk = '#555e6b'; // grey for unknown / X/Z phase
+
+          if (row.hasIsUnknownGate) {
+            // ── Two-phase bus: GTKWave-style X/Z region before N, blue known region from N ──
+            const xKnown = edgeX(TRIG); // N boundary — where !$isunknown is satisfied
+            const xXmid  = (ML + xKnown) / 2;
+            const yMid   = Math.round((yH + yL) / 2);
+            const xClipId = `unk-${idx}`;
+
+            // 1 · X-state region: gold fill + crossing diagonals (GTKWave style) + bold "X"
+            s += `<defs><clipPath id="${xClipId}"><rect x="${ML}" y="${yH}" width="${xKnown - ML}" height="${SIG_H}"/></clipPath></defs>`;
+            s += `<rect x="${ML}" y="${yH}" width="${xKnown - ML}" height="${SIG_H}" fill="${cTrig}" opacity="0.12"/>`;
+            // Corner-to-corner diagonals clipped to the box
+            s += `<line x1="${ML}" y1="${yH}" x2="${xKnown}" y2="${yL}" stroke="${cTrig}" stroke-width="1.2" opacity="0.4" clip-path="url(#${xClipId})"/>`;
+            s += `<line x1="${ML}" y1="${yL}" x2="${xKnown}" y2="${yH}" stroke="${cTrig}" stroke-width="1.2" opacity="0.4" clip-path="url(#${xClipId})"/>`;
+            // Top/bottom bus border lines for the X region
+            s += `<line x1="${ML}" y1="${yH}" x2="${xKnown}" y2="${yH}" stroke="${cTrig}" stroke-width="1.5" opacity="0.7"/>`;
+            s += `<line x1="${ML}" y1="${yL}" x2="${xKnown}" y2="${yL}" stroke="${cTrig}" stroke-width="1.5" opacity="0.7"/>`;
+            // Bold centred "X"
+            s += `<text x="${xXmid}" y="${yMid + 3}" text-anchor="middle" font-size="9" font-weight="bold" fill="${cTrig}" opacity="0.85">X</text>`;
+
+            // 2 · Bold gold divider at cycle N
+            s += `<line x1="${xKnown}" y1="${yH}" x2="${xKnown}" y2="${yL}" stroke="${cTrig}" stroke-width="2" opacity="0.9"/>`;
+            // "✓ no X/Z" annotation above the divider (centred on xKnown)
+            s += `<text x="${xKnown}" y="${yH - 5}" text-anchor="middle" font-size="7" fill="${cTrig}" opacity="0.9">✓ no X/Z</text>`;
+
+            // 3 · Blue known phase
+            // Low line from transition to bus start (zero length when no delay: xKnown == xBusStart)
+            s += `<path d="M${xKnown},${yL} L${xBusStart},${yL}" fill="none" stroke="${cExp}" stroke-width="1.5"/>`;
+            s += `<path d="M${xBusEnd},${yL} L${xEnd},${yL}" fill="none" stroke="${cExp}" stroke-width="1.5"/>`;
+            s += `<rect x="${xBusStart + diag}" y="${yH}" width="${Math.max(0, xBusEnd - xBusStart - 2 * diag)}" height="${SIG_H}" fill="${cExp}" opacity="0.12"/>`;
+            s += `<path d="M${xBusStart},${yL} L${xBusStart + diag},${yH} L${xBusEnd - diag},${yH} L${xBusEnd},${yL}" fill="none" stroke="${cExp}" stroke-width="1.5"/>`;
+            // Value label: starts ≥8px after the right edge of "✓ no X/Z" (which spans ~16px right of xKnown)
+            // text-anchor=start so it flows right and never collides with the annotation
+            const valLabelX = Math.max(xBusStart + diag + 4, xKnown + 24);
+            s += `<text x="${valLabelX}" y="${yH - 5}" text-anchor="start" font-size="8" fill="${cExp}" opacity="0.9">${escapeHTML(row.busValue)}</text>`;
+          } else {
+            // Standard single-phase bus (no unknown gate)
+            s += `<path d="M${ML},${yL} L${xBusStart},${yL}" fill="none" stroke="${cExp}" stroke-width="1.5"/>`;
+            s += `<path d="M${xBusEnd},${yL} L${xEnd},${yL}" fill="none" stroke="${cExp}" stroke-width="1.5"/>`;
+            s += `<rect x="${xBusStart + diag}" y="${yH}" width="${Math.max(0, xBusEnd - xBusStart - 2 * diag)}" height="${SIG_H}" fill="${cExp}" opacity="0.12"/>`;
+            s += `<path d="M${xBusStart},${yL} L${xBusStart + diag},${yH} L${xBusEnd - diag},${yH} L${xBusEnd},${yL}" fill="none" stroke="${cExp}" stroke-width="1.5"/>`;
+            s += `<text x="${(xBusStart + xBusEnd) / 2}" y="${yH - 5}" text-anchor="middle" font-size="8" fill="${cExp}" opacity="0.9">${escapeHTML(row.busValue)}</text>`;
+          }
 
         } else if (row.throughoutRole === 'hold') {
           // Sustained HIGH from cycle N through the entire window
@@ -1145,19 +1265,47 @@ assert property (p_burst_valid);`,
       }
     });
 
-    // Left-side bracket grouping antecedent signals (only when there are 2+)
+    // Square [ bracket grouping all antecedent trigger rows
     const trigIdxFirst = rows.findIndex(r => r.type === 'trigger');
     const trigIdxLast  = rows.map(r => r.type).lastIndexOf('trigger');
-    if (trigIdxFirst >= 0 && trigIdxLast > trigIdxFirst) {
-      const bx   = 5;
+    if (trigIdxFirst >= 0) {
+      const bspine = 4, barm = 16; // fixed in the 36-unit bracket zone; ML formula keeps labels clear
       const yTop = MT + trigIdxFirst * ROW_H + SIG_PAD;
       const yBot = MT + trigIdxLast  * ROW_H + SIG_PAD + SIG_H;
-      const midY = (yTop + yBot) / 2;
-      s += `<line x1="${bx}" y1="${yTop}" x2="${bx}" y2="${yBot}" stroke="${cTrig}" stroke-width="1.2" opacity="0.45"/>`;
-      s += `<line x1="${bx}" y1="${yTop}" x2="${bx + 5}" y2="${yTop}" stroke="${cTrig}" stroke-width="1.2" opacity="0.45"/>`;
-      s += `<line x1="${bx}" y1="${yBot}" x2="${bx + 5}" y2="${yBot}" stroke="${cTrig}" stroke-width="1.2" opacity="0.45"/>`;
-      s += `<text transform="rotate(-90,${bx - 2},${midY})" x="${bx - 2}" y="${midY + 3}" text-anchor="middle" font-size="7.5" fill="${cTrig}" opacity="0.55">antecedent</text>`;
+      if (trigIdxLast > trigIdxFirst) {
+        // Multiple rows: square [ bracket (top arm + spine + bottom arm)
+        const bPath = `M${barm},${yTop} L${bspine},${yTop} L${bspine},${yBot} L${barm},${yBot}`;
+        s += `<path d="${bPath}" fill="none" stroke="${cTrig}" stroke-width="1.2" opacity="0.65"/>`;
+      } else {
+        // Single row: short vertical tick
+        s += `<line x1="${bspine}" y1="${yTop}" x2="${bspine}" y2="${yBot}" stroke="${cTrig}" stroke-width="1.2" opacity="0.55"/>`;
+      }
     }
+
+    // Color legend — always rendered below the time axis
+    // Shows a colored swatch + label for each signal role present in this waveform.
+    const legendItems = [{ color: cClk, label: 'Clock' }];
+    if (rows.some(r => r.type === 'trigger'))   legendItems.push({ color: cTrig, label: 'Antecedent' });
+    if (rows.some(r => r.type === 'expect'))    legendItems.push({ color: cExp,  label: 'Consequent' });
+    if (rows.some(r => r.hasIsUnknownGate))     legendItems.push({ color: cTrig, label: 'Unknown/X/Z', hatched: true });
+    const ITEM_W  = 80;  // horizontal space per legend item
+    const swatchW = 10, swatchH = 7;
+    const waveMidX = ML + (TOTAL * CW) / 2;
+    const legendStartX = Math.max(ML, waveMidX - (legendItems.length * ITEM_W) / 2);
+    const legendY = axisY + 26;
+    legendItems.forEach((item, i) => {
+      const lx = legendStartX + i * ITEM_W;
+      s += `<rect x="${lx}" y="${legendY}" width="${swatchW}" height="${swatchH}" rx="1" fill="${item.color}" opacity="${item.hatched ? 0.12 : 0.75}"/>`;
+      if (item.hatched) {
+        // X-cross swatch matches the GTKWave-style X-state bus rendering (gold diagonals)
+        const hId = `lh-${i}`;
+        s += `<defs><clipPath id="${hId}"><rect x="${lx}" y="${legendY}" width="${swatchW}" height="${swatchH}"/></clipPath></defs>`;
+        s += `<line x1="${lx}" y1="${legendY}" x2="${lx + swatchW}" y2="${legendY + swatchH}" stroke="${item.color}" stroke-width="1" opacity="0.45" clip-path="url(#${hId})"/>`;
+        s += `<line x1="${lx}" y1="${legendY + swatchH}" x2="${lx + swatchW}" y2="${legendY}" stroke="${item.color}" stroke-width="1" opacity="0.45" clip-path="url(#${hId})"/>`;
+        s += `<rect x="${lx}" y="${legendY}" width="${swatchW}" height="${swatchH}" rx="1" fill="none" stroke="${item.color}" stroke-width="0.8" opacity="0.6"/>`;
+      }
+      s += `<text x="${lx + swatchW + 4}" y="${legendY + swatchH - 1}" font-size="8" fill="${cText}">${escapeHTML(item.label)}</text>`;
+    });
 
     return `<svg viewBox="0 0 ${svgW} ${svgH}" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto;display:block;overflow:visible;">${s}</svg>`;
   }
@@ -1736,11 +1884,46 @@ assert property (p_burst_valid);`,
 
   // ── Boot ─────────────────────────────────────────────────────────
 
-  document.addEventListener('DOMContentLoaded', () => {
-    cacheDom();
-    bindEvents();
-    updateCharCount();
-    updateHighlight();
-  });
+  if (typeof document !== 'undefined') {
+    document.addEventListener('DOMContentLoaded', () => {
+      cacheDom();
+      bindEvents();
+      updateCharCount();
+      updateHighlight();
+    });
+  }
+
+  /* ── Test Exports (Node / Jest only) ──────────────────────────────
+     No logic lives here — this only surfaces existing private functions
+     for unit testing when the file is require()'d in Node.
+  ────────────────────────────────────────────────────────────────── */
+  if (typeof module !== 'undefined') {
+    module.exports = {
+      _test: {
+        stripComments,
+        extractAssertionBody,
+        extractClock,
+        extractDisableIff,
+        extractLocalVars,
+        extractCore,
+        findImplicationOp,
+        humanizeExpr,
+        buildClockReset,
+        buildTrigger,
+        buildImplication,
+        buildExpectation,
+        buildTemporal,
+        buildWarnings,
+        buildEdgeCase,
+        parseSVA,
+        extractAntecedentInfo,
+        _parseAntecedentSignals,
+        parseConsequentSignals,
+        extractConsequentInfo,
+        buildTLDR,
+        detectUnsupportedConstructs,
+      },
+    };
+  }
 
 })();
